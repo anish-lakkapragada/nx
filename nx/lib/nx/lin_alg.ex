@@ -315,8 +315,6 @@ defmodule Nx.LinAlg do
     |> Nx.as_type(output_type)
   end
 
-  @neg_one -1
-  @neg_two -2
   defnp norm_integer(t, ord, opts) do
     type = Nx.type(t)
     output_type = real_type(type)
@@ -336,7 +334,7 @@ defmodule Nx.LinAlg do
         |> Nx.as_type(output_type)
 
 
-      {{_, _}, @neg_one} ->
+      {{_, _}, -1} ->
         t
         |> Nx.abs()
         |> Nx.sum(axes: [0])
@@ -344,10 +342,10 @@ defmodule Nx.LinAlg do
         |> Nx.as_type(output_type)
 
 
-      {{_, _}, ord} when Elixir.Kernel.not(Elixir.Kernel.in(ord, [@neg_two, @neg_one, 1, 2])) ->
+      {{_, _}, ord} when Elixir.Kernel.not(Elixir.Kernel.in(ord, [-2, -1, 1, 2])) ->
         raise ArgumentError, "invalid :ord for 2-D tensor, got: #{inspect(ord)}"
 
-      {{_, _}, @neg_two} ->
+      {{_, _}, -2} ->
         {_u, s, _v} = svd_transform(t)
         Nx.reduce_min(s)
 
