@@ -241,46 +241,72 @@ defmodule Nx.LinAlg do
       ** (ArgumentError) expected a 2-D tensor for ord: :frobenius, got a 1-D tensor
   """
   @doc from_backend: false
-  defn norm(tensor, opts \\ []) do
+  defn norm(t, opts \\ []) do
     opts = keyword!(opts, [:ord, :axes])
-    norm_transform(tensor, opts)
-  end
 
-  deftransformp norm_transform(t, opts) do
     rank = Nx.rank(t)
 
-    unless rank == 1 or rank == 2 do
+    case rank do
+      rank when rank == 1 or rank == 2 ->
+      nil
+    _ ->
       raise ArgumentError, "expected 1-D or 2-D tensor, got tensor with shape #{inspect(t.shape)}"
     end
 
-    axes_opts = Keyword.take(opts, [:axes])
+    axes_opts = [axes: opts[:axes]]
 
-    case opts[:ord] do
-      nil when rank == 1 -> norm_integer(t, 2, axes_opts)
-      nil when rank == 2 -> norm_integer(t, 2, axes_opts)
-      :frobenius -> norm_frobenius(t, axes_opts)
-      :nuclear when rank == 2 -> norm_nuclear(t)
-      :nuclear -> raise ArgumentError, "nuclear norm not supported for rank != 2"
-      ord when ord in [:inf, :neg_inf] -> norm_inf(t, ord, axes_opts)
-      ord when is_integer(ord) -> norm_integer(t, ord, axes_opts)
-      ord -> raise ArgumentError, "unknown ord #{inspect(ord)}"
+    case {rank, opts[:ord]} do
+      {rank, nil} when rank == 1 -> norm_integer(t, 2, axes_opts)
+      {rank, nil} when rank == 2 -> norm_integer(t, 2, axes_opts)
+      {_, :frobenius} -> norm_frobenius(t, axes_opts)
+      {rank, :nuclear} when rank == 2 -> norm_nuclear(t)
+      {_, :nuclear} -> raise ArgumentError, "nuclear norm not supported for rank != 2"
+      {_, ord} when ord == :inf or ord == :neg_inf -> norm_inf(t, ord: ord)
+      {_, ord} ->
+        case is_int(ord) do
+          true ->
+            norm_integer(t, ord, axes_opts)
+          false ->
+            raise ArgumentError, "unknown ord #{inspect(ord)}"
+        end
     end
   end
 
-  defp norm_frobenius(%{shape: {_}}, _opts),
-    do: raise(ArgumentError, "expected a 2-D tensor for ord: :frobenius, got a 1-D tensor")
+  deftransformp is_int(n), do: is_integer(n)
 
-  defp norm_frobenius(%{shape: {_, _}} = t, opts), do: norm_integer(t, 2, opts)
-
-  defp norm_nuclear(%{shape: {_, _}} = t) do
-    {_u, s, _v} = svd(t)
-    Nx.sum(s)
+  defnp norm_frobenius(tensor, opts) do
+    case Nx.rank(tensor) do
+      2 -> norm_integer(tensor, 2, opts)
+      _ -> raise(ArgumentError, "expected a 2-D tensor for ord: :frobenius, got a 1-D tensor")
+    end
   end
 
-  defp norm_inf(%{shape: shape, type: type} = t, ord, _opts) when ord in [:inf, :neg_inf] do
-    output_type = Nx.Type.to_real(type)
-    aggregate_axes = if tuple_size(shape) == 2, do: &Nx.sum(&1, axes: [1]), else: & &1
-    reduce = if ord == :inf, do: &Nx.reduce_max/1, else: &Nx.reduce_min/1
+  defnp norm_nuclear(%{shape: {_, _}} = t) do
+    case Nx.rank(t) do
+      2 ->
+        {_u, s, _v} = svd_transform(t)
+        Nx.sum(s)
+      _ ->
+        raise(ArgumentError, "expected a 2-D tensor for ord: :nuclear")
+    end
+  end
+
+  defnp norm_inf(t, opts \\ []) do
+    ord = opts[:ord]
+    shape = Nx.shape(t)
+    type = Nx.type(t)
+    output_type = real_type(type)
+
+    aggregate_axes = case shape do
+      {_, _} -> &Nx.sum(&1, axes: [1])
+      _ -> & &1
+    end
+
+    reduce =
+      case ord do
+        :inf -> &Nx.reduce_max/1
+        :neg_inf  -> &Nx.reduce_min/1
+      end
 
     t
     |> Nx.abs()
@@ -289,56 +315,65 @@ defmodule Nx.LinAlg do
     |> Nx.as_type(output_type)
   end
 
-  defp norm_integer(%{shape: {_}, type: type} = t, 0, _opts) do
-    output_type = Nx.Type.to_real(type)
+  @neg_one -1
+  @neg_two -2
+  defnp norm_integer(t, ord, opts) do
+    type = Nx.type(t)
+    output_type = real_type(type)
 
-    t
-    |> Nx.not_equal(0)
-    |> Nx.sum()
-    |> Nx.as_type(output_type)
+    case {Nx.shape(t), ord} do
+      {{_}, 0} ->
+        t
+        |> Nx.not_equal(0)
+        |> Nx.sum()
+        |> Nx.as_type(output_type)
+
+      {{_, _}, 1} ->
+        t
+        |> Nx.abs()
+        |> Nx.sum(axes: [0])
+        |> Nx.reduce_max()
+        |> Nx.as_type(output_type)
+
+
+      {{_, _}, @neg_one} ->
+        t
+        |> Nx.abs()
+        |> Nx.sum(axes: [0])
+        |> Nx.reduce_min()
+        |> Nx.as_type(output_type)
+
+
+      {{_, _}, ord} when Elixir.Kernel.not(Elixir.Kernel.in(ord, [@neg_two, @neg_one, 1, 2])) ->
+        raise ArgumentError, "invalid :ord for 2-D tensor, got: #{inspect(ord)}"
+
+      {{_, _}, @neg_two} ->
+        {_u, s, _v} = svd_transform(t)
+        Nx.reduce_min(s)
+
+      {_, ord} ->
+        inv_ord = Nx.tensor(1 / ord, type: output_type)
+        # We extract this result to a variable because it's used both for
+        # getting the normalization coefficient and for the main pipe chain
+        abs_t = Nx.abs(t)
+
+        # This coefficient is introduced for better numerical stability
+        # The idea is that by dividing the tensor by it, large values of
+        # tensor entries and large values of p are reduced, which in turn
+        # avoids numerical overflow.
+        numerical_stability_coefficient = Nx.reduce_max(abs_t)
+
+        abs_t
+        |> Nx.divide(numerical_stability_coefficient)
+        |> Nx.power(ord)
+        |> Nx.sum(opts)
+        |> Nx.power(inv_ord)
+        |> Nx.multiply(numerical_stability_coefficient)
+      end
   end
 
-  defp norm_integer(%{shape: {_, _}, type: type} = t, ord, _opts) when ord in [1, -1] do
-    output_type = Nx.Type.to_real(type)
-    function = if ord == 1, do: &Nx.reduce_max/1, else: &Nx.reduce_min/1
-
-    t
-    |> Nx.abs()
-    |> Nx.sum(axes: [0])
-    |> function.()
-    |> Nx.as_type(output_type)
-  end
-
-  defp norm_integer(%{shape: {_, _}}, ord, _opts) when ord not in [-2, -1, 1, 2] do
-    raise ArgumentError, "invalid :ord for 2-D tensor, got: #{inspect(ord)}"
-  end
-
-  defp norm_integer(%{shape: {_, _}} = t, -2, _opts) do
-    {_u, s, _v} = svd(t)
-    Nx.reduce_min(s)
-  end
-
-  defp norm_integer(%{type: type} = t, ord, opts) when is_integer(ord) do
-    output_type = Nx.Type.to_real(type)
-    inv_ord = Nx.tensor(1 / ord, type: output_type)
-
-    # We extract this result to a variable because it's used both for
-    # getting the normalization coefficient and for the main pipe chain
-    abs_t = Nx.abs(t)
-
-    # This coefficient is introduced for better numerical stability
-    # The idea is that by dividing the tensor by it, large values of
-    # tensor entries and large values of p are reduced, which in turn
-    # avoids numerical overflow.
-    numerical_stability_coefficient = Nx.reduce_max(abs_t)
-
-    abs_t
-    |> Nx.divide(numerical_stability_coefficient)
-    |> Nx.power(ord)
-    |> Nx.sum(opts)
-    |> Nx.power(inv_ord)
-    |> Nx.multiply(numerical_stability_coefficient)
-  end
+  deftransformp svd_transform(t), do: svd(t)
+  deftransformp real_type(type), do: Nx.Type.to_real(type)
 
   @doc """
   Solve the equation `a x = b` for x, assuming `a` is a triangular matrix.
