@@ -47,18 +47,18 @@ class ExlaBuffer {
 
 class ExlaExecutable {
  public:
-  ExlaExecutable(std::unique_ptr<xla::PjRtExecutable> executable,
+  ExlaExecutable(std::unique_ptr<xla::PjRtLoadedExecutable> executable,
                  absl::optional<std::string> fingerprint,
                  ExlaClient* client);
 
-  xla::PjRtExecutable* executable() { return executable_.get(); }
+  xla::PjRtLoadedExecutable* executable() { return executable_.get(); }
 
   xla::StatusOr<ERL_NIF_TERM> Run(ErlNifEnv* env,
                                   ERL_NIF_TERM arguments,
                                   int device_id);
 
  private:
-  std::unique_ptr<xla::PjRtExecutable> executable_;
+  std::unique_ptr<xla::PjRtLoadedExecutable> executable_;
   absl::optional<std::string> fingerprint_;
   ExlaClient* client_;
 };
